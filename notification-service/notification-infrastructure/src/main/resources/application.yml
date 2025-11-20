@@ -1,0 +1,86 @@
+spring:
+  application:
+    name: notification-service
+
+server:
+  port: 8082
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+# Email Configuration
+notification:
+  email:
+    provider: ${EMAIL_PROVIDER:sendgrid}
+    api-key: ${EMAIL_API_KEY:dummy_key}
+    from: ${EMAIL_FROM:noreply@ecommerce.com}
+
+---
+# ============================================
+# Local Profile
+# ============================================
+spring:
+  config:
+    activate:
+      on-profile: local
+
+  data:
+    mongodb:
+      uri: mongodb://admin:admin_pass@localhost:27017/ecommerce_events?authSource=admin
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      group-id: notification-service-group
+      auto-offset-reset: earliest
+      properties:
+        spring.json.trusted.packages: "*"
+
+logging:
+  level:
+    com.quind.ecommerce: DEBUG
+
+---
+# ============================================
+# Docker Profile
+# ============================================
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  data:
+    mongodb:
+      uri: mongodb://admin:admin_pass@mongodb:27017/ecommerce_events?authSource=admin
+
+  kafka:
+    bootstrap-servers: kafka:29092
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      group-id: notification-service-group
+      auto-offset-reset: earliest
+      properties:
+        spring.json.trusted.packages: "*"
+
+logging:
+  level:
+    com.quind.ecommerce: INFO
