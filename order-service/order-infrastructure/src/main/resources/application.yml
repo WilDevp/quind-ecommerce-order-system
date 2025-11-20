@@ -1,0 +1,104 @@
+spring:
+  application:
+    name: order-service
+
+server:
+  port: 8080
+
+# ============================================
+# Common Configuration (Shared across profiles)
+# ============================================
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+---
+# ============================================
+# Local Profile (Running in IDE)
+# ============================================
+spring:
+  config:
+    activate:
+      on-profile: local
+
+  r2dbc:
+    url: r2dbc:postgresql://localhost:5432/ecommerce
+    username: ecommerce_user
+    password: ecommerce_pass
+
+  data:
+    mongodb:
+      uri: mongodb://admin:admin_pass@localhost:27017/ecommerce_events?authSource=admin
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      group-id: order-service-group
+      auto-offset-reset: earliest
+      properties:
+        spring.json.trusted.packages: "*"
+
+logging:
+  level:
+    com.quind.ecommerce: DEBUG
+    org.springframework.r2dbc: DEBUG
+
+---
+# ============================================
+# Docker Profile (Running in Docker Compose)
+# ============================================
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  r2dbc:
+    url: r2dbc:postgresql://postgres:5432/ecommerce
+    username: ecommerce_user
+    password: ecommerce_pass
+
+  data:
+    mongodb:
+      uri: mongodb://admin:admin_pass@mongodb:27017/ecommerce_events?authSource=admin
+
+  kafka:
+    bootstrap-servers: kafka:29092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      group-id: order-service-group
+      auto-offset-reset: earliest
+      properties:
+        spring.json.trusted.packages: "*"
+
+logging:
+  level:
+    com.quind.ecommerce: INFO
