@@ -1,0 +1,377 @@
+services:
+  # PostgreSQL - Base de datos transaccional para Orders y Payments
+  postgres:
+    image: postgres:16-alpine
+    container_name: ecommerce-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce}
+      POSTGRES_USER: ${POSTGRES_USER:-ecommerce_user}
+      # WARNING: Default password is weak! Change in production via .env file
+      # Use a strong password with 16+ characters, mix of letters/numbers/symbols
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ecommerce_pass}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/database/init:/docker-entrypoint-initdb.d
+    networks:
+      - ecommerce-network
+    # Resource limits - Adjust based on your workload
+    # These limits prevent a single service from consuming all system resources
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'      # Max 2 CPU cores
+          memory: 2G       # Max 2GB RAM
+        reservations:
+          cpus: '0.5'      # Reserve 0.5 CPU cores
+          memory: 512M     # Reserve 512MB RAM
+    # Restart policy - Always restart unless explicitly stopped
+    # Options: no, always, on-failure, unless-stopped
+    restart: unless-stopped
+    # Logging configuration - Prevents logs from filling disk
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"    # Max log file size
+        max-file: "3"      # Keep max 3 log files (30MB total)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ecommerce_user} -d ${POSTGRES_DB:-ecommerce}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB - Event Store y Notificaciones
+  mongodb:
+    image: mongo:7.0
+    container_name: ecommerce-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      # WARNING: Default password is weak! Change in production via .env file
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-admin_pass}
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE:-ecommerce_events}
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./infrastructure/database/mongo-init:/docker-entrypoint-initdb.d
+    networks:
+      - ecommerce-network
+    # Resource limits for MongoDB
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    # Always restart MongoDB - It's critical for event storage
+    restart: unless-stopped
+    # Log rotation to prevent disk space issues
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Zookeeper - Requerido por Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: ecommerce-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "${ZOOKEEPER_PORT:-2181}:2181"
+    networks:
+      - ecommerce-network
+    # Resource limits for Zookeeper - It's lightweight but critical
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: echo srvr | nc localhost 2181 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka - Message Broker para comunicación asíncrona
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: ecommerce-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # WARNING: Replication factor = 1 is for DEVELOPMENT ONLY!
+      # Single broker means NO fault tolerance. If Kafka crashes, you lose in-flight messages.
+      # Production: Use 3+ brokers with replication factor = 3, min ISR = 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_NUM_PARTITIONS: 3
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    networks:
+      - ecommerce-network
+    # Kafka can be memory-hungry - Allocate generously
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Kafka UI - Interfaz web para monitorear Kafka
+  # WARNING: NO authentication enabled! Anyone with network access can view/manage Kafka.
+  # Development: This is fine if running locally
+  # Production: Enable authentication, restrict network access, or remove entirely
+  # See: https://docs.kafka-ui.provectus.io/configuration/authentication
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ecommerce-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      # TODO: Add authentication in production
+      # AUTH_TYPE: "LOGIN_FORM"
+      # SPRING_SECURITY_USER_NAME: "admin"
+      # SPRING_SECURITY_USER_PASSWORD: "strong_password_here"
+    ports:
+      - "${KAFKA_UI_PORT:-8090}:8080"
+    networks:
+      - ecommerce-network
+    # Kafka UI is lightweight
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    # Only restart on failure - Not critical for system operation
+    restart: on-failure
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # Order Service - Puerto 8080
+  order-service:
+    build:
+      context: ./order-service
+      dockerfile: Dockerfile
+    container_name: ecommerce-order-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-docker}
+      SERVER_PORT: 8080
+
+      # PostgreSQL
+      SPRING_R2DBC_URL: r2dbc:postgresql://postgres:5432/${POSTGRES_DB:-ecommerce}
+      SPRING_R2DBC_USERNAME: ${POSTGRES_USER:-ecommerce_user}
+      SPRING_R2DBC_PASSWORD: ${POSTGRES_PASSWORD:-ecommerce_pass}
+
+      # MongoDB
+      SPRING_DATA_MONGODB_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-admin_pass}@mongodb:27017/${MONGO_DATABASE:-ecommerce_events}?authSource=admin
+
+      # Kafka
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_PRODUCER_KEY_SERIALIZER: org.apache.kafka.common.serialization.StringSerializer
+      SPRING_KAFKA_PRODUCER_VALUE_SERIALIZER: org.springframework.kafka.support.serializer.JsonSerializer
+      SPRING_KAFKA_CONSUMER_KEY_DESERIALIZER: org.apache.kafka.common.serialization.StringDeserializer
+      SPRING_KAFKA_CONSUMER_VALUE_DESERIALIZER: org.springframework.kafka.support.serializer.JsonDeserializer
+      SPRING_KAFKA_CONSUMER_GROUP_ID: order-service-group
+      SPRING_KAFKA_CONSUMER_AUTO_OFFSET_RESET: earliest
+
+      # Application
+      ORDER_SERVICE_KAFKA_TOPIC_ORDER_EVENTS: order-events
+      ORDER_SERVICE_KAFKA_TOPIC_PAYMENT_EVENTS: payment-events
+    ports:
+      - "${ORDER_SERVICE_PORT:-8080}:8080"
+    networks:
+      - ecommerce-network
+    # Resource limits for Order Service
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    profiles:
+      - services
+
+  # Payment Service - Puerto 8081
+  payment-service:
+    build:
+      context: ./payment-service
+      dockerfile: Dockerfile
+    container_name: ecommerce-payment-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-docker}
+      SERVER_PORT: 8081
+
+      # PostgreSQL
+      SPRING_R2DBC_URL: r2dbc:postgresql://postgres:5432/${POSTGRES_DB:-ecommerce}
+      SPRING_R2DBC_USERNAME: ${POSTGRES_USER:-ecommerce_user}
+      SPRING_R2DBC_PASSWORD: ${POSTGRES_PASSWORD:-ecommerce_pass}
+
+      # Kafka
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_PRODUCER_KEY_SERIALIZER: org.apache.kafka.common.serialization.StringSerializer
+      SPRING_KAFKA_PRODUCER_VALUE_SERIALIZER: org.springframework.kafka.support.serializer.JsonSerializer
+      SPRING_KAFKA_CONSUMER_KEY_DESERIALIZER: org.apache.kafka.common.serialization.StringDeserializer
+      SPRING_KAFKA_CONSUMER_VALUE_DESERIALIZER: org.springframework.kafka.support.serializer.JsonDeserializer
+      SPRING_KAFKA_CONSUMER_GROUP_ID: payment-service-group
+      SPRING_KAFKA_CONSUMER_AUTO_OFFSET_RESET: earliest
+
+      # Application
+      PAYMENT_SERVICE_KAFKA_TOPIC_ORDER_EVENTS: order-events
+      PAYMENT_SERVICE_KAFKA_TOPIC_PAYMENT_EVENTS: payment-events
+      PAYMENT_SERVICE_GATEWAY_URL: ${PAYMENT_GATEWAY_URL:-https://api.stripe.com}
+      PAYMENT_SERVICE_GATEWAY_API_KEY: ${PAYMENT_GATEWAY_API_KEY:-sk_test_dummy}
+    ports:
+      - "${PAYMENT_SERVICE_PORT:-8081}:8081"
+    networks:
+      - ecommerce-network
+    # Resource limits for Payment Service
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    profiles:
+      - services
+
+  # Notification Service - Puerto 8082
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    container_name: ecommerce-notification-service
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-docker}
+      SERVER_PORT: 8082
+
+      # MongoDB
+      SPRING_DATA_MONGODB_URI: mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-admin_pass}@mongodb:27017/${MONGO_DATABASE:-ecommerce_events}?authSource=admin
+
+      # Kafka
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_CONSUMER_KEY_DESERIALIZER: org.apache.kafka.common.serialization.StringDeserializer
+      SPRING_KAFKA_CONSUMER_VALUE_DESERIALIZER: org.springframework.kafka.support.serializer.JsonDeserializer
+      SPRING_KAFKA_CONSUMER_GROUP_ID: notification-service-group
+      SPRING_KAFKA_CONSUMER_AUTO_OFFSET_RESET: earliest
+
+      # Application
+      NOTIFICATION_SERVICE_KAFKA_TOPIC_ORDER_EVENTS: order-events
+      NOTIFICATION_SERVICE_KAFKA_TOPIC_PAYMENT_EVENTS: payment-events
+      NOTIFICATION_SERVICE_EMAIL_PROVIDER: ${EMAIL_PROVIDER:-sendgrid}
+      NOTIFICATION_SERVICE_EMAIL_API_KEY: ${EMAIL_API_KEY:-dummy_key}
+      NOTIFICATION_SERVICE_EMAIL_FROM: ${EMAIL_FROM:-noreply@ecommerce.com}
+    ports:
+      - "${NOTIFICATION_SERVICE_PORT:-8082}:8082"
+    networks:
+      - ecommerce-network
+    # Resource limits for Notification Service
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    profiles:
+      - services
+
+networks:
+  ecommerce-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  mongodb_data:
+    driver: local
